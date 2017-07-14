@@ -33,7 +33,7 @@ export class {{classname}} {{#parent}}extends {{{parent}}} {{/parent}}{
 }
 {{/isEnum}}
 {{#isEnum}}
-type {{classname}} =
+export type {{classname}} =
 {{#allowableValues}}
 {{#values}}
     '{{.}}' {{^-last}}|{{/-last}}
@@ -130,7 +130,7 @@ export class {{classname}} {
     protected defaultHeaders : any = {};
     protected _useQuerystring : boolean = false;
 
-    protected authentications = {
+    protected authentications: any = {
         'default': <Authentication>new VoidAuth(),
 {{#authMethods}}
 {{#isBasic}}
