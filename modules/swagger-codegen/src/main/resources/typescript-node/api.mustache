@@ -20,6 +20,7 @@ let defaultBasePath = '{{basePath}}';
 * {{{description}}}
 */
 {{/description}}
+{{^isEnum}}
 export class {{classname}} {{#parent}}extends {{{parent}}} {{/parent}}{
 {{#vars}}
 {{#description}}
@@ -30,6 +31,15 @@ export class {{classname}} {{#parent}}extends {{{parent}}} {{/parent}}{
     '{{name}}': {{#isEnum}}{{{datatypeWithEnum}}}{{/isEnum}}{{^isEnum}}{{{datatype}}}{{/isEnum}};
 {{/vars}}
 }
+{{/isEnum}}
+{{#isEnum}}
+type {{classname}} =
+{{#allowableValues}}
+{{#values}}
+    '{{.}}' {{^-last}}|{{/-last}}
+{{/values}}
+{{/allowableValues}};
+{{/isEnum}}
 
 {{#hasEnums}}
 export namespace {{classname}} {
