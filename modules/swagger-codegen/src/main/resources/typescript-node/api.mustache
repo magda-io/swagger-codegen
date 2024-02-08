@@ -1,6 +1,5 @@
 {{>licenseInfo}}
-import request from 'request';
-import http from 'node:http';
+import fetch, { Headers } from 'cross-fetch';
 {{^supportsES6}}
 import Promise from 'bluebird';
 {{/supportsES6}}
@@ -59,34 +58,187 @@ export namespace {{classname}} {
 {{/model}}
 {{/models}}
 
+interface GenericRecord {
+    [key: string]: any;
+}
+
+export interface RequestOptions extends RequestInit {
+    qs?: GenericRecord;
+    json?: boolean;
+    body?: any;
+    uri?: string;
+    formData?: { [key: string]: any };
+    form?: { [key: string]: any } | string;
+}
+
+export function setRequestOptionsHeader(
+    requestOptions: RequestOptions,
+    headerName: string,
+    headerValue: string
+) {
+    if (!requestOptions?.headers) {
+        requestOptions.headers = new Headers();
+    }
+    if (requestOptions.headers instanceof Headers) {
+        requestOptions.headers.set(headerName, headerValue);
+    } else {
+        (requestOptions.headers as any)[headerName] = headerValue;
+    }
+}
+
+export const isPlainObj = (value: any) =>
+    !!value && Object.getPrototypeOf(value) === Object.prototype;
+
+export const isTextMimeType = (contentType: string) =>
+    /text\/.*/i.test(contentType) || /[\/|\+]xml.*/i.test(contentType);
+
+export class ServerError extends Error {
+    public statusCode: number;
+
+    constructor(message: string = 'Unknown Error', statusCode: number = 500) {
+        super(message);
+        this.statusCode = statusCode;
+    }
+
+    toData() {
+        return {
+            isError: true,
+            errorCode: this.statusCode,
+            errorMessage: this.message
+        };
+    }
+}
+
+export async function fetchWithRequestOptions(
+    requestOptions: RequestOptions
+): Promise<{ response: Response; body: any }> {
+    const { uri, qs, json, form, formData, ...fetchOptions } = requestOptions;
+
+    const url = new URL(uri);
+
+    if (qs && Object.keys(qs).length > 0) {
+        for (const key in qs) {
+            const value = qs[key];
+            url.searchParams.delete(key);
+            if (Array.isArray(value)) {
+                value.forEach((v) => url.searchParams.append(key, v));
+            } else {
+                url.searchParams.append(key, value);
+            }
+        }
+    }
+
+    if (fetchOptions?.body) {
+        const body = fetchOptions.body;
+        const requireJsonStringify = isPlainObj(body) || Array.isArray(body);
+        if (json || requireJsonStringify) {
+            setRequestOptionsHeader(
+                fetchOptions,
+                'Content-Type',
+                'application/json'
+            );
+        }
+
+        if (requireJsonStringify) {
+            fetchOptions.body = JSON.stringify(body);
+        } else {
+            fetchOptions.body = body;
+        }
+    }
+
+    if (form && formData) {
+        throw new Error(
+            'Only one of form or formData can be set for request options'
+        );
+    }
+
+    if (fetchOptions?.body && (form || formData)) {
+        throw new Error(
+            'Only one of body or form or formData can be set for request options'
+        );
+    }
+
+    if (form) {
+        setRequestOptionsHeader(
+            fetchOptions,
+            'Content-Type',
+            'application/x-www-form-urlencoded'
+        );
+        if (typeof form === 'string') {
+            fetchOptions.body = form;
+        } else {
+            const params = new URLSearchParams();
+            for (const key in form) {
+                params.append(key, form[key]);
+            }
+            fetchOptions.body = params;
+        }
+    }
+
+    if (formData) {
+        const form = new FormData();
+        for (const key in formData) {
+            form.append(key, formData[key]);
+        }
+        fetchOptions.body = form;
+    }
+
+    const res = await fetch(url, fetchOptions);
+    if (res.ok) {
+        let contentType = res.headers.get('Content-Type');
+        contentType = contentType ? contentType : '';
+        if (res.headers.get('Content-Type') === 'application/json') {
+            return { response: res, body: await res.json() };
+        } else if (isTextMimeType(contentType)) {
+            return { response: res, body: await res.text() };
+        } else {
+            return { response: res, body: await res.blob() };
+        }
+    } else {
+        throw { response: res, body: await res.text() };
+    }
+}
+
 export interface Authentication {
     /**
-    * Apply authentication settings to header and query params.
-    */
-    applyToRequest(requestOptions: request.Options): void;
+     * Apply authentication settings to header and query params.
+     */
+    applyToRequest(fetchOptions: RequestOptions): void;
 }
 
 export class HttpBasicAuth implements Authentication {
     public username: string;
     public password: string;
-    applyToRequest(requestOptions: request.Options): void {
-        requestOptions.auth = {
-            username: this.username, password: this.password
-        }
+    applyToRequest(requestOptions: RequestOptions): void {
+        const basicAuthValue = Buffer.from(
+            this.username + ':' + this.password,
+            'utf-8'
+        ).toString('base64');
+        setRequestOptionsHeader(
+            requestOptions,
+            'Authorization',
+            'Basic ' + basicAuthValue
+        );
     }
 }
 
 export class ApiKeyAuth implements Authentication {
     public apiKey: string;
 
-    constructor(private location: string, private paramName: string) {
-    }
+    constructor(private location: string, private paramName: string) {}
 
-    applyToRequest(requestOptions: request.Options): void {
-        if (this.location == "query") {
-            (<any>requestOptions.qs)[this.paramName] = this.apiKey;
-        } else if (this.location == "header" && requestOptions && requestOptions.headers) {
-            requestOptions.headers[this.paramName] = this.apiKey;
+    applyToRequest(requestOptions: RequestOptions): void {
+        if (this.location == 'query') {
+            if (!requestOptions.qs) {
+                requestOptions.qs = {};
+            }
+            requestOptions.qs[this.paramName] = this.apiKey;
+        } else if (this.location == 'header') {
+            setRequestOptionsHeader(
+                requestOptions,
+                this.paramName,
+                this.apiKey
+            );
         }
     }
 }
@@ -94,17 +246,19 @@ export class ApiKeyAuth implements Authentication {
 export class OAuth implements Authentication {
     public accessToken: string;
 
-    applyToRequest(requestOptions: request.Options): void {
-        if (requestOptions && requestOptions.headers) {
-            requestOptions.headers["Authorization"] = "Bearer " + this.accessToken;
-        }
+    applyToRequest(requestOptions: RequestOptions): void {
+        setRequestOptionsHeader(
+            requestOptions,
+            'Authorization',
+            'Bearer ' + this.accessToken
+        );
     }
 }
 
 export class VoidAuth implements Authentication {
     public username: string;
     public password: string;
-    applyToRequest(_: request.Options): void {
+    applyToRequest(_: RequestOptions): void {
         // Do nothing
     }
 }
@@ -128,7 +282,6 @@ export enum {{classname}}ApiKeys {
 export class {{classname}} {
     protected basePath = defaultBasePath;
     protected defaultHeaders : any = {};
-    protected _useQuerystring : boolean = false;
 
     protected authentications: any = {
         'default': <Authentication>new VoidAuth(),
@@ -169,10 +322,6 @@ export class {{classname}} {
         }
     }
 
-    set useQuerystring(value: boolean) {
-        this._useQuerystring = value;
-    }
-
     public setApiKey(key: {{classname}}ApiKeys, value: string) {
         this.authentications[{{classname}}ApiKeys[key]].apiKey = value;
     }
@@ -199,7 +348,7 @@ export class {{classname}} {
      * {{notes}}
      {{#allParams}}* @param {{paramName}} {{description}}
      {{/allParams}}*/
-    public {{nickname}} ({{#allParams}}{{paramName}}{{^required}}?{{/required}}: {{{dataType}}}{{#hasMore}}, {{/hasMore}}{{/allParams}}) : Promise<{ response: http.{{#supportsES6}}IncomingMessage{{/supportsES6}}{{^supportsES6}}ClientResponse{{/supportsES6}}; {{#returnType}}body: {{{returnType}}}; {{/returnType}}{{^returnType}}body?: any; {{/returnType}} }> {
+    public {{nickname}} ({{#allParams}}{{paramName}}{{^required}}?{{/required}}: {{{dataType}}}{{#hasMore}}, {{/hasMore}}{{/allParams}}) : Promise<{ response: Response; {{#returnType}}body: {{{returnType}}}; {{/returnType}}{{^returnType}}body?: any; {{/returnType}} }> {
         const localVarPath = this.basePath + '{{path}}'{{#pathParams}}
             .replace('{' + '{{baseName}}' + '}', String({{paramName}})){{/pathParams}};
         let queryParameters: any = {};
@@ -233,17 +382,14 @@ export class {{classname}} {
 {{/isFile}}
 
 {{/formParams}}
-        let requestOptions: request.Options = {
+
+        const requestOptions: RequestOptions = {
             method: '{{httpMethod}}',
             qs: queryParameters,
             headers: headerParams,
             uri: localVarPath,
-            useQuerystring: this._useQuerystring,
 {{^isResponseFile}}
             json: true,
-{{/isResponseFile}}
-{{#isResponseFile}}
-            encoding: null,
 {{/isResponseFile}}
 {{#bodyParam}}
             body: {{paramName}},
@@ -263,19 +409,8 @@ export class {{classname}} {
                 requestOptions.form = formParams;
             }
         }
-        return new Promise<{ response: http.{{#supportsES6}}IncomingMessage{{/supportsES6}}{{^supportsES6}}ClientResponse{{/supportsES6}}; {{#returnType}}body: {{{returnType}}}; {{/returnType}}{{^returnType}}body?: any; {{/returnType}} }>((resolve, reject) => {
-            request(requestOptions, (error, response, body) => {
-                if (error) {
-                    reject(error);
-                } else {
-                    if (response.statusCode >= 200 && response.statusCode <= 299) {
-                        resolve({ response: response, body: body });
-                    } else {
-                        reject({ response: response, body: body });
-                    }
-                }
-            });
-        });
+
+        return fetchWithRequestOptions(requestOptions);
     }
 {{/operation}}
 }
