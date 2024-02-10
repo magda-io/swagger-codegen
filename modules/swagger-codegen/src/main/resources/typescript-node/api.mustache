@@ -69,6 +69,7 @@ export interface RequestOptions extends RequestInit {
     uri?: string;
     formData?: { [key: string]: any };
     form?: { [key: string]: any } | string;
+    encoding?: null | string;
 }
 
 export function setRequestOptionsHeader(
@@ -76,6 +77,9 @@ export function setRequestOptionsHeader(
     headerName: string,
     headerValue: string
 ) {
+    if(headerValue === null || typeof headerValue === 'undefined') {
+        return;
+    }
     if (!requestOptions?.headers) {
         requestOptions.headers = new Headers();
     }
@@ -92,27 +96,20 @@ export const isPlainObj = (value: any) =>
 export const isTextMimeType = (contentType: string) =>
     /text\/.*/i.test(contentType) || /[\/|\+]xml.*/i.test(contentType);
 
-export class ServerError extends Error {
-    public statusCode: number;
-
-    constructor(message: string = 'Unknown Error', statusCode: number = 500) {
-        super(message);
-        this.statusCode = statusCode;
-    }
-
-    toData() {
-        return {
-            isError: true,
-            errorCode: this.statusCode,
-            errorMessage: this.message
-        };
-    }
-}
+export const isNotEmpty = (val: any) => val !== null && val !== undefined;
 
 export async function fetchWithRequestOptions(
     requestOptions: RequestOptions
 ): Promise<{ response: Response; body: any }> {
-    const { uri, qs, json, form, formData, ...fetchOptions } = requestOptions;
+    const {
+        uri,
+        qs,
+        json,
+        encoding,
+        form,
+        formData,
+        ...fetchOptions
+    } = requestOptions;
 
     const url = new URL(uri);
 
@@ -120,6 +117,10 @@ export async function fetchWithRequestOptions(
         for (const key in qs) {
             const value = qs[key];
             url.searchParams.delete(key);
+            if (!isNotEmpty(value)) {
+                url.searchParams.append(key, '');
+                continue;
+            }
             if (Array.isArray(value)) {
                 value.forEach((v) => url.searchParams.append(key, v));
             } else {
@@ -184,18 +185,29 @@ export async function fetchWithRequestOptions(
     }
 
     const res = await fetch(url, fetchOptions);
-    if (res.ok) {
-        let contentType = res.headers.get('Content-Type');
-        contentType = contentType ? contentType : '';
-        if (res.headers.get('Content-Type') === 'application/json') {
-            return { response: res, body: await res.json() };
-        } else if (isTextMimeType(contentType)) {
-            return { response: res, body: await res.text() };
-        } else {
-            return { response: res, body: await res.blob() };
-        }
+    let contentType = res.headers.get('Content-Type');
+    contentType = contentType ? contentType : '';
+
+    let body: any;
+    if (encoding === null) {
+        body = await res.blob();
+    } else if (contentType === 'application/json') {
+        body = await res.json();
+    } else if (isTextMimeType(contentType)) {
+        body = await res.text();
     } else {
-        throw { response: res, body: await res.text() };
+        if (typeof encoding === 'string' && encoding) {
+            const buffer = await res.arrayBuffer();
+            const decoder = new TextDecoder(encoding);
+            body = decoder.decode(buffer);
+        } else {
+            body = await res.text();
+        }
+    }
+    if (res.ok) {
+        return { response: res, body };
+    } else {
+        throw { response: res, body };
     }
 }
 
@@ -368,7 +380,9 @@ export class {{classname}} {
 
 {{/queryParams}}
 {{#headerParams}}
-        headerParams['{{baseName}}'] = {{paramName}};
+        if (isNotEmpty({{paramName}})) {
+            headerParams['{{baseName}}'] = {{paramName}};
+        }
 
 {{/headerParams}}
         let useFormData = false;
@@ -390,6 +404,9 @@ export class {{classname}} {
             uri: localVarPath,
 {{^isResponseFile}}
             json: true,
+{{/isResponseFile}}
+{{#isResponseFile}}
+            encoding: null,
 {{/isResponseFile}}
 {{#bodyParam}}
             body: {{paramName}},
